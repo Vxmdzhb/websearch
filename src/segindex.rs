@@ -1,29 +1,27 @@
-//! The segmented index store: `websearch`'s [`Index`] persisted as
+//! The segmented index store: `websearch`'s [`Index`] saved as
 //! [`crawlcore::segstore`] records instead of one blob.
 //!
-//! # What this is for
+//! # What it's for
 //!
 //! [`Index::snapshot`] serialises the whole store to one `Vec<u8>` and
-//! [`Index::restore`] parses it back. That is still here, still the default, and
-//! still what the binary, the tests and the goldens use — this module does not
-//! replace it, it sits beside it, and `--store=segments` chooses. What it fixes
-//! is that a blob save is *all or nothing, once*:
+//! [`Index::restore`] parses it back. That's still here and still the
+//! default; this module sits beside it, and `--store=segments` chooses. A
+//! blob save is all or nothing, once:
 //!
-//! - a crawl that adds 100 pages to a 1 000 000-page index rewrites 1 000 000
-//!   pages, so saving is something you do at the end rather than as you go;
-//! - and therefore a `SIGKILL` four hours into a five-hour crawl loses four
-//!   hours, even though `atomicfile` guarantees the file on disk is intact —
-//!   intact and four hours stale.
+//! - a crawl adding 100 pages to a 1 000 000-page index rewrites 1 000 000
+//!   pages, so you save at the end rather than as you go;
+//! - so a `SIGKILL` four hours into a five-hour crawl loses four hours. The
+//!   file is intact, thanks to `atomicfile`, but four hours out of date.
 //!
-//! Here a flush writes only what changed since the last flush, so it is cheap
+//! Here a flush writes only what changed since the last one, which is cheap
 //! enough to do every few hundred pages, so a kill costs at most those pages.
 //! `tests/segindex_crash.rs` kills a writer with `SIGKILL` and checks exactly
 //! that.
 //!
-//! # The record split, and why `Rank` is its own record
+//! # Record kinds, and why `Rank` is separate
 //!
-//! Six record kinds, keyed so that a key-ordered scan replays them in dependency
-//! order (documents before the ranking signals that overlay them):
+//! Seven record kinds, keyed so that a key-ordered scan replays them in
+//! dependency order (documents before the ranking signals on top of them):
 //!
 //! | tag | record       | key                     | written by                    |
 //! |-----|--------------|-------------------------|-------------------------------|
@@ -35,56 +33,48 @@
 //! | 5   | `Rank`       | `5 ‖ doc_id`            | `finalize`                    |
 //! | 6   | `Meta`       | `6`                     | any rowid allocation          |
 //!
-//! The split that matters is `Doc` versus `Rank`. `Index::finalize` recomputes
-//! `incoming`, `rank` and `host_rank` for **every** document in the corpus. If
-//! those three numbers lived on the `Doc` record, every finalize would rewrite
-//! every document *body* — a full snapshot wearing a segment store's clothes, and
-//! the incremental win would evaporate at the exact moment the crawl ends. As a
-//! separate ~40-byte record they cost about 0.3 % of a corpus-sized rewrite. The
-//! ordering falls out for free: tag 5 sorts after tag 0, so a scan always has the
-//! document in hand before the score that decorates it.
+//! The split that matters is `Doc` versus `Rank`. `Index::finalize`
+//! recomputes `incoming`, `rank` and `host_rank` for **every** document. If
+//! they lived on the `Doc` record, every finalize would rewrite every document
+//! *body*, and the incremental saving would vanish just as the crawl ends. As
+//! a separate ~40-byte record they cost about 0.3 % of a full rewrite. Tag 5
+//! sorts after tag 0, so a scan always has the document before its score.
 //!
-//! `Images`/`Videos` use tombstones for real: `replace_images(id, &[])` clears a
-//! document's harvested rows, and "cleared" has to be *written down*, because
-//! segments are immutable and the old rows are still sitting in an older one.
-//! `HostAuth` too — `compute_host_authority` clears and rebuilds its map, so a
-//! host that drops out of the graph is tombstoned rather than left behind as a
-//! stale score.
+//! `Images`/`Videos` really use tombstones: `replace_images(id, &[])` clears a
+//! document's rows, and "cleared" has to be written down, because segments are
+//! immutable and the old rows are still in an older one. Same for `HostAuth`:
+//! `compute_host_authority` rebuilds its map, so a host that drops out of the
+//! graph is tombstoned rather than left with a stale score.
 //!
-//! # What this does NOT buy
+//! # Limits
 //!
-//! **The read path is still fully resident, on purpose.** [`SegmentedIndex::load`]
-//! streams the segments — one record at a time, bounded memory, per
-//! [`crawlcore::segstore::Reader`] — and folds them into an ordinary, complete
-//! [`Index`]. It does not hand out a lazy, disk-backed index, and that is a
-//! decision rather than an omission:
+//! **Reading is still fully resident, on purpose.** [`SegmentedIndex::load`]
+//! streams the segments, one record at a time in bounded memory, through
+//! [`crawlcore::segstore::Reader`], and folds them into an ordinary, complete
+//! [`Index`]. There's no lazy, disk-backed index, by choice:
 //!
-//! - [`crate::ranking::search`] computes BM25 over the corpus. It needs every
-//!   document's term frequencies *and* corpus-wide document frequencies and
-//!   average field lengths for a single query. There is no inverted index here
-//!   (see the `ranking` module docs on why the FTS5 stand-in is what it is), so a
-//!   query is a full pass, and a "streaming" search would stream the whole corpus
-//!   per query — strictly worse than holding it.
-//! - `Index` already memoises a corpus-sized tokenisation (`Derived`) precisely
-//!   because rebuilding it per request was measured at 790 ms on a *small*
-//!   corpus. Backing documents with disk while keeping their tokenisations in RAM
-//!   would save the smaller half.
+//! - [`crate::ranking::search`] computes BM25, which needs every document's
+//!   term frequencies plus corpus-wide document frequencies and average field
+//!   lengths for each query. With no inverted index (see the `ranking` module
+//!   docs), a query is a full pass anyway, and "streaming" search would read
+//!   the whole corpus per query.
+//! - `Index` already keeps a corpus-sized tokenisation in memory (`Derived`),
+//!   because rebuilding it per request is slow; keeping documents on disk while
+//!   their tokenisations stay in RAM would save the smaller half.
 //!
-//! So of the four problems in [`crawlcore::segstore`]'s docs, this adoption fixes
-//! 2 (incremental writes), 3 (a bounded crash window) and 4 (resume) outright,
-//! and 1 (memory) only on the **write** side: a save no longer needs a second
-//! copy of the corpus, because what has to be resident to be written is the
-//! batch. Peak RSS while *serving* is unchanged. Fixing that means an inverted
-//! index with on-disk postings, which is a different project.
+//! So of the four problems in [`crawlcore::segstore`]'s docs, this fixes 2
+//! (incremental writes), 3 (a bounded crash window) and 4 (resuming) outright,
+//! and 1 (memory) only on the **write** side: saving no longer needs a second
+//! copy of the corpus. Memory while *serving* is unchanged; fixing that needs
+//! an inverted index with on-disk postings, which is a separate project.
 //!
-//! **Harvested media row order is canonicalised.** The blob keeps
-//! `Index`'s image/video rows in the order `replace_images` last touched each
-//! document; the segmented store groups them by document id, ascending. The two
-//! agree for any crawl that indexes a document once — which is every crawl except
-//! a partial recrawl of an already-indexed page — and the difference can only
-//! move rows whose media-BM25 scores are exactly equal (see
-//! `media_search_indices`, which breaks ties by row position). It is pinned by a
-//! test rather than left to be discovered.
+//! **Media row order is canonical.** The blob keeps image/video rows in the
+//! order `replace_images` last touched each document; the segmented store
+//! groups them by document id, ascending. They agree for any crawl that
+//! indexes a document once (anything but a partial recrawl of an indexed
+//! page), and the difference can only reorder rows with exactly equal media
+//! BM25 scores (see `media_search_indices`, which breaks ties by position). A
+//! test pins it.
 
 use std::path::Path;
 
@@ -499,31 +489,30 @@ impl SegmentedIndex {
         if let Some(next_id) = pending_meta {
             ix.set_next_rowid(next_id);
         }
-        // Tracking on, log empty: from here the store persists deltas. Order
-        // matters — `track_changes(true)` marks the whole index dirty (so a store
-        // that was never flushed cannot silently lose its head start), and this
-        // index came *from* the store, so that head start is already durable.
+        // Tracking on, log empty: from here on the store saves deltas. The order
+        // matters: `track_changes(true)` marks the whole index dirty (so a store that
+        // was never flushed can't lose its start), and this index came *from* the
+        // store, so that start is already on disk.
         ix.track_changes(true);
         let _ = ix.drain_changes();
         Ok(ix)
     }
 
-    /// Write everything `index` has changed since the last flush, as one segment,
-    /// and commit it.
+    /// Write everything `index` changed since the last flush as one segment, and
+    /// commit it.
     ///
-    /// This is the operation the whole design exists for: its cost is the size of
-    /// the change, so calling it every few hundred pages is affordable, and
-    /// calling it every few hundred pages is what bounds a crash to a few hundred
-    /// pages.
+    /// This is what the design is for: its cost is the size of the change, so
+    /// calling it every few hundred pages is affordable, and that is what limits
+    /// a crash to a few hundred pages.
     ///
-    /// Requires [`Index::track_changes`] to be on; without it the index has no
-    /// idea what changed and a flush would be silently empty, so this turns it on
-    /// (which marks everything dirty) rather than writing nothing.
+    /// Needs [`Index::track_changes`] on; without it the index doesn't know what
+    /// changed and the flush would be empty, so this turns it on (which marks
+    /// everything dirty) rather than writing nothing.
     ///
     /// # Errors
     /// I/O errors writing the segment or the manifest. On failure the change log
-    /// has already been drained into the batch that failed — see the note in the
-    /// body — so the caller should treat a flush error as fatal to the run.
+    /// has already been drained into the failed batch (see the note in the body),
+    /// so treat a flush error as fatal to the run.
     pub fn flush(&mut self, index: &mut Index) -> Result<FlushStats> {
         if !index.is_tracking_changes() {
             index.track_changes(true);
@@ -652,9 +641,9 @@ impl SegmentedIndex {
         if !self.store.should_compact(max_segments) {
             return Ok(None);
         }
-        // Everything, as in `maybe_compact`. Flushes during the fold append
-        // segments AFTER the run being folded, so the prefix the merge captured
-        // is still the prefix when it is installed.
+        // Everything, as in `maybe_compact`. Flushes during the fold add segments
+        // after the run being folded, so the merge's prefix is still a prefix when
+        // it's installed.
         self.store.start_merge(self.store.segment_count())
     }
 
@@ -712,29 +701,25 @@ pub fn load_index(dir: impl AsRef<Path>) -> Result<Index> {
 
 /// Run `crawler` into `seg`, committing a segment every `flush_every` pages.
 ///
-/// # Why the crawl is sliced
+/// [`crate::crawler::Crawler::run`] crawls to the end and the caller saves
+/// afterwards; with a blob that's the only sane shape, and it's why a
+/// `SIGKILL` mid-run loses the run. Here a commit costs a batch, so the loop
+/// is: crawl a little, commit, repeat. The store is always on disk up to the
+/// last finished slice, so `flush_every` is the crash window in pages, a
+/// number the operator sets.
 ///
-/// [`crate::crawler::Crawler::run`] crawls to exhaustion and the caller then
-/// saves. With a blob that is the only sane shape, because saving costs a corpus
-/// rewrite — and it is exactly why a `SIGKILL` mid-run loses the run. Here a
-/// commit costs a batch, so the loop is: crawl a little, commit, repeat. At every
-/// instant the store is durable up to the last completed slice, which makes
-/// `flush_every` the crash window in pages: a number an operator sets, rather
-/// than however long the crawl happened to be.
-///
-/// Folding happens between slices too, where a pause costs nothing — otherwise a
-/// long crawl accumulates hundreds of segments and every later read pays for all
-/// of them.
+/// Compaction happens between slices too, where a pause costs nothing;
+/// otherwise a long crawl would pile up hundreds of segments and every later
+/// read would pay for them.
 ///
 /// Stops when the page budget is spent, or when a slice makes no progress (the
-/// frontier is drained, or what is left is blocked by robots or a host budget).
-/// Returns the run's accumulated statistics, as [`crate::crawler::Crawler::run`]
-/// would.
+/// frontier is empty, or what's left is blocked by robots or a host budget).
+/// Returns the run's accumulated statistics, like
+/// [`crate::crawler::Crawler::run`].
 ///
 /// # Errors
-/// A failed flush or fold. Treat it as fatal to the run: the change log has
-/// already been drained into the batch that failed, so continuing would silently
-/// skip those pages.
+/// A failed flush or fold. Treat it as fatal: the change log has already been
+/// drained into the failed batch, so carrying on would skip those pages.
 #[cfg(feature = "net")]
 pub async fn crawl_into(
     crawler: &mut crate::crawler::Crawler,

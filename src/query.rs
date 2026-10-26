@@ -1,17 +1,17 @@
-//! The query language — tokenising and parsing what a user types into a
-//! structured [`Query`] the matcher and the filters can act on.
+//! The query language: turning what a user types into a structured [`Query`]
+//! the matcher and the filters can act on.
 //!
-//! Split out of [`crate::ranking`] so the language has one home: the syntax, its
-//! operator table, and the tests that pin every awkward shape (unmatched quotes,
-//! an operator with no value, a bare term that merely looks like one) live
-//! together, and the scorer imports a parsed structure rather than owning a
+//! Separate from [`crate::ranking`] so the language has one home: the syntax,
+//! its operator table and the tests for every awkward shape (unmatched
+//! quotes, an operator with no value, a word that merely looks like one) live
+//! together, and the scorer takes a parsed structure instead of owning a
 //! parser.
 //!
 //! # The language
 //!
 //! | form | meaning |
 //! |------|---------|
-//! | `term` | optional — a document matching ANY optional term is a candidate |
+//! | `term` | optional: a document matching ANY optional term is a candidate |
 //! | `+term` | required |
 //! | `-term` | excluded |
 //! | `"two words"` | phrase: the words in that order, adjacent |
@@ -22,16 +22,16 @@
 //! | `intitle:word` | the word must be in the title |
 //! | `before:YYYY-MM-DD`, `after:` | crawl-date bounds |
 //! | `date:A..B` | both bounds at once |
-//! | `boost:host`, `penalize:host` | per-query ranking optics |
+//! | `boost:host`, `penalize:host` | per-query ranking adjustments |
 //!
-//! Two rules keep the language predictable, and both are load-bearing:
+//! Two rules keep it predictable:
 //!
-//! * **An unadorned query parses exactly as it always did.** `rust programming`
-//!   yields the same `optional`/`highlight` lists as before this module existed —
-//!   `tests/xcheck_ranking.rs` pins that against the retired Python reference.
-//! * **A token is an operator only if its key is in [`OPERATORS`].** `https://x/a:b`
-//!   contains a colon but `https` is not an operator, so it stays a plain term;
-//!   no user input can reach a matcher as syntax.
+//! * **A plain query parses the same as ever.** `rust programming` gives the
+//!   same `optional`/`highlight` lists as the Python version;
+//!   `tests/xcheck_ranking.rs` checks that.
+//! * **A token is an operator only if its key is in [`OPERATORS`].**
+//!   `https://x/a:b` has a colon but `https` isn't an operator, so it stays a
+//!   plain term; no user input reaches a matcher as syntax.
 
 use crate::ranking::words;
 use std::collections::HashSet;
@@ -190,10 +190,9 @@ fn apply_operator(q: &mut Query, key: &str, value: &str, negated: bool) {
         return;
     }
     if negated {
-        // Only the host filter has a meaningful negation today. Any other
-        // negated operator is dropped rather than exploded into `excluded`
-        // words: `-lang:en` used to add "lang" and "en" as excluded TERMS, which
-        // silently threw away every document containing the word "lang".
+        // Only the host filter has a meaningful negation. Any other negated operator
+        // is dropped rather than split into excluded words (`-lang:en` must not
+        // exclude every document containing "lang").
         if key == "site" || key == "host" {
             let h = host_value(value);
             if !h.is_empty() && !q.not_site.contains(&h) {
@@ -433,8 +432,7 @@ mod tests {
             Some("example.com")
         );
 
-        // `-site:` is repeatable and de-duplicated; it does not become excluded
-        // WORDS, which is what the parser used to do with it.
+        // `-site:` is repeatable and de-duplicated; it never becomes excluded words.
         let n = parse_query("cats -site:spam.example -site:ads.example -site:spam.example");
         assert_eq!(n.not_site, sv(&["spam.example", "ads.example"]));
         assert!(
@@ -472,9 +470,9 @@ mod tests {
         assert_eq!(bad.after, None);
     }
 
-    /// An operator with NO value is not an operator. `site:` installs no filter;
-    /// the token is tokenised as the ordinary word "site", so the query still
-    /// searches for something instead of silently matching everything.
+    /// An operator with no value isn't an operator. `site:` sets no filter; the
+    /// token becomes the plain word "site", so the query still searches for
+    /// something instead of matching everything.
     #[test]
     fn an_operator_without_a_value_is_a_word() {
         for raw in ["site:", "before:", "filetype:", "-site:"] {
@@ -511,8 +509,8 @@ mod tests {
     }
 
     /// Negation is defined for the host filter only. Any other negated operator
-    /// is dropped, NOT exploded into excluded words — `-lang:en` used to exclude
-    /// every document containing the word "lang".
+    /// is dropped, not split into excluded words: `-lang:en` must not exclude
+    /// every document containing "lang".
     #[test]
     fn negating_an_operator_without_a_negation_drops_it() {
         let q = parse_query("cats -lang:en");

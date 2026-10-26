@@ -192,13 +192,12 @@ fn find_space(chars: &[char], from: usize, to: usize) -> Option<usize> {
     (from..to).find(|&i| chars[i] == ' ')
 }
 
-/// How much of a document body [`make_snippet`] will scan for term hits.
+/// How much of a document body [`make_snippet`] scans for term hits.
 ///
-/// A snippet is `width` (280) characters wide, so a hit 64 kB into the body can
-/// never be rendered anyway — but the hit scan used to run over the whole
-/// uncapped body, once per result row, ten rows per page, while holding the
-/// index mutex. Capping the region bounds the two `Vec<char>` allocations at
-/// 256 kB each and the scan at a fixed cost, whatever the crawler stored.
+/// A snippet is `width` (280) characters wide, so a hit 64 kB into the body
+/// can never be shown anyway. Capping the region bounds the two `Vec<char>`
+/// allocations at 256 kB each and the scan at a fixed cost per result row
+/// (ten per page, under the index mutex), whatever the crawler stored.
 const SNIPPET_SCAN_CHARS: usize = 64 * 1024;
 
 #[cfg(test)]
@@ -929,10 +928,9 @@ mod audit_regression {
         }
     }
 
-    /// AUDIT REGRESSION (HIGH). The linear two-pointer window must choose the
-    /// SAME start as the quadratic loop it replaced, over many hit shapes:
-    /// clustered, sparse, single, all-identical-gap, and widths from 0 to wider
-    /// than the whole hit range.
+    /// The linear two-pointer window must choose the same start as a quadratic
+    /// loop would, over many hit shapes: clustered, sparse, single, equal gaps,
+    /// and widths from 0 to wider than the whole hit range.
     #[test]
     fn the_linear_window_picks_the_same_start_as_the_quadratic_one() {
         let mut rng = Rng(0x2545_F491_4F6C_DD1D);
@@ -999,32 +997,24 @@ mod audit_regression {
         }
     }
 
-    /// AUDIT REGRESSION (HIGH). 256 kB of `"a "` with `a` as the term is 128k hit
-    /// positions; the quadratic window took **12.85 s** on it, ten times per
-    /// results page, holding the index mutex throughout. The linear window plus
-    /// the scan cap put it in single-digit milliseconds.
+    /// 256 kB of `"a "` with `a` as the term is 128k hit positions; a quadratic
+    /// window took **12.85 s** on it, ten times per results page, holding the
+    /// index mutex. The linear window plus the scan cap take milliseconds.
     ///
-    /// What is asserted is the step count, not the clock. The bound here was
-    /// `dt < 300 ms`, a number taken from release timings — CI builds tests
-    /// unoptimised, where the same call costs 10-50× more — and under contention
-    /// on two cores it measured 313 to 424 ms over fifteen runs, failing all
-    /// fifteen. Steps do not depend on the machine: over the
-    /// [`SNIPPET_SCAN_CHARS`] the snippet actually scans there are 32 768 hits,
-    /// the two-pointer walk takes exactly 98 303 steps, and the nested form it
-    /// replaced takes 32 768² ≈ 1.1e9 comparisons. Four orders of magnitude is a
-    /// gap no scheduler can close in either direction.
+    /// The test asserts the step count, not the clock (debug builds are 10-50×
+    /// slower than release, and busy runners slower still). Steps don't depend on
+    /// the machine: over the [`SNIPPET_SCAN_CHARS`] the snippet scans there are
+    /// 32 768 hits, the two-pointer walk takes exactly 98 303 steps, and the
+    /// nested form takes 32 768² ≈ 1.1e9 comparisons.
     ///
-    /// The count is pinned exactly rather than bounded from above, because an
-    /// upper bound is satisfied by zero and zero is what the regression produces:
-    /// [`best_window_start`]'s step tally is a reading of `lo`/`hi`, and the
-    /// nested rewrite has no `lo`/`hi`, so restoring it deletes the tally with
-    /// them. That mutation compiles, emits no clippy warning under `-D warnings`,
-    /// and passed `steps <= 4 * hits` — a wall-clock bound would not have been a
-    /// reliable backstop either. Against `assert_eq!` it reports 0 and fails.
+    /// The count is pinned exactly, not bounded from above, because zero would
+    /// satisfy an upper bound, and zero is what a nested rewrite reports:
+    /// [`best_window_start`]'s step tally reads `lo`/`hi`, which a nested loop
+    /// doesn't have.
     ///
     /// This pins the shape of the window search, not the cost of `make_snippet`
-    /// as a whole; `the_rendered_snippet_is_unchanged_for_normal_bodies` above is
-    /// what pins the answer it produces.
+    /// as a whole; `the_rendered_snippet_is_unchanged_for_normal_bodies` above
+    /// pins the answer.
     #[test]
     fn a_body_of_nothing_but_hits_is_not_quadratic() {
         let body = "a ".repeat(128 * 1024);

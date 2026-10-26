@@ -1,4 +1,4 @@
-//! SSRF gate — the crown-jewel safety invariant for a clearnet crawler, as a type.
+//! SSRF gate: the key safety invariant of a clearnet crawler, as a type.
 //!
 //! A web crawler fetches arbitrary, attacker-influenced URLs; without a guard it
 //! can be steered at internal addresses (localhost, RFC-1918, the cloud-metadata
@@ -179,16 +179,15 @@ impl SafeIp {
         self.0
     }
 
-    /// Escape hatch: mint a `SafeIp` for an **explicitly operator-allow-listed**
-    /// internal host (the `allow_hosts` config), bypassing the internal check.
+    /// Escape hatch: make a `SafeIp` for an **explicitly allow-listed** internal
+    /// host (the `allow_hosts` config), skipping the internal check.
     ///
-    /// `pub(crate)` on purpose — only this crate's own resolver
-    /// ([`crate::httpclient`]) can produce a `SafeIp` over an internal address,
-    /// and only after [`crate::httpclient::authority_exempt`] has matched the
-    /// authority against the operator's allow-list. Callers outside the crate can
-    /// still *only* obtain a strictly-external `SafeIp` via
-    /// [`SafeIp::from_ip`] / [`SafeIp::vet`], so the SSRF type-gate holds by
-    /// default and the exemption is a narrow, audit-visible bypass.
+    /// `pub(crate)` on purpose: only this crate's resolver ([`crate::httpclient`])
+    /// can produce a `SafeIp` for an internal address, and only after
+    /// [`crate::httpclient::authority_exempt`] has matched the authority against
+    /// the operator's allow-list. Outside the crate, [`SafeIp::from_ip`] and
+    /// [`SafeIp::vet`] only ever give strictly external addresses, so the gate
+    /// holds by default and the exemption is narrow and visible.
     #[must_use]
     pub(crate) fn exempt(ip: IpAddr) -> SafeIp {
         SafeIp(ip)

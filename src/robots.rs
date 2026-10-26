@@ -91,11 +91,10 @@ fn iter_groups(text: &str) -> Vec<Group> {
     let mut delay: Option<f64> = None;
     let mut last_was_agent = false;
 
-    // A UTF-8 BOM is common on robots.txt files saved by Windows editors, and
-    // it is NOT `char::is_whitespace`, so leaving it attached makes the first
-    // field `"\u{feff}user-agent"` — no group is ever opened, every rule is
-    // dropped by the `agents.is_none()` guard, and the whole file silently
-    // becomes allow-all. Strip it before parsing, as every real parser does.
+    // A UTF-8 BOM is common in robots.txt files saved by Windows editors, and it
+    // isn't `char::is_whitespace`, so left in place it makes the first field
+    // `"\u{feff}user-agent"`: no group ever opens, every rule is dropped, and the
+    // whole file becomes allow-all. Strip it first, as every real parser does.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
 
     for raw in text.lines() {
@@ -134,11 +133,10 @@ fn iter_groups(text: &str) -> Vec<Group> {
             "disallow" => rules.push((false, value.to_string())),
             "allow" => rules.push((true, value.to_string())),
             "crawl-delay" => {
-                // Rust's f64 parser accepts "inf"/"nan"; a site serving either
-                // used to reserve its host until `now + inf`, so the host was
-                // never leasable again while still counting as queued — the
-                // crawl loop then span forever without fetching a page. Only a
-                // finite, non-negative, sanely-bounded delay is a delay.
+                // Rust's f64 parser accepts "inf" and "nan", and an infinite delay would
+                // reserve the host forever while it still counts as queued, so the crawl
+                // would spin without fetching anything. Only a finite, non-negative,
+                // sensibly bounded delay counts.
                 if let Ok(d) = value.parse::<f64>() {
                     if d.is_finite() && (0.0..=MAX_CRAWL_DELAY).contains(&d) {
                         delay = Some(d);
@@ -160,12 +158,10 @@ fn iter_groups(text: &str) -> Vec<Group> {
 /// leading run of `[A-Za-z_-]`, so `astrx-websearch/1.0 (+https://…)` is
 /// `astrx-websearch`.
 ///
-/// Matching used to be `our_ua.contains(group_token)`, which is not a
-/// containment relation any spec defines and is wrong in the crawler's favour:
-/// `"User-agent: e\nDisallow:\nUser-agent: *\nDisallow: /"` made the one-letter
-/// group `e` "specific" for `astrx-websearch`, so the `*` group's `Disallow: /`
-/// was discarded entirely and the crawler fetched a site that had told everyone
-/// not to. Equality on both sides' product tokens is the rule the RFC states.
+/// Groups match by equality of product tokens, as the RFC says. A substring
+/// test would be wrong in the crawler's favour: a one-letter group `e` would
+/// count as "specific" to `astrx-websearch`, and the `*` group's
+/// `Disallow: /` would be ignored.
 fn product_token(s: &str) -> String {
     s.chars()
         .take_while(|c| c.is_ascii_alphabetic() || *c == '_' || *c == '-')
@@ -273,9 +269,9 @@ mod tests {
 mod audit_regression {
     use super::*;
 
-    /// A UTF-8 BOM is not `char::is_whitespace`, so it used to make the first
-    /// field `"\u{feff}user-agent"`: no group was ever opened, every rule was
-    /// dropped, and the whole file silently became allow-all.
+    /// A UTF-8 BOM isn't `char::is_whitespace`; left attached, it would make the
+    /// first field `"\u{feff}user-agent"`, drop every rule and turn the file into
+    /// allow-all.
     #[test]
     fn a_utf8_bom_does_not_make_the_file_allow_all() {
         let r = parse(
@@ -286,11 +282,9 @@ mod audit_regression {
         assert!(r.can_fetch("/public"));
     }
 
-    /// AUDIT REGRESSION (LOW). Group selection was `our_ua.contains(group_token)`.
-    /// A one-letter group therefore matched almost every crawler: `e` is a
-    /// substring of `astrx-websearch`, so that group counted as "specific", the
-    /// `*` group was discarded, and its `Disallow: /` never applied — the crawler
-    /// then fetched a site that had told everyone not to.
+    /// Group selection must be by equal product token, not substring: `e` is a
+    /// substring of `astrx-websearch`, and treating that group as "specific"
+    /// would discard the `*` group and its `Disallow: /`.
     #[test]
     fn a_one_letter_group_does_not_capture_our_user_agent() {
         let r = parse(

@@ -1,17 +1,14 @@
 //! This process's request counters, and the route → action classifier that
-//! bounds their label cardinality.
+//! keeps their label cardinality bounded.
 //!
-//! Before this existed, `websearch`'s `/metrics` had exactly two series
-//! (`websearch_docs`, `websearch_hosts`) — both index gauges. Nothing anywhere
-//! reported how many requests the server was handling or how many of them were
-//! failing, and `suitedash`'s own default configuration asks for
-//! `websearch_searches_total` (see `suitedash::config::default_services`), a
-//! metric that did not exist: the dashboard has been rendering a permanent `—`
-//! for it. Both gaps are closed here.
+//! Besides the index gauges (`websearch_docs`, `websearch_hosts`), `/metrics`
+//! reports requests and their outcomes, including `websearch_searches_total`,
+//! which `suitedash`'s default configuration asks for (see
+//! `suitedash::config::default_services`).
 //!
-//! The counters live in [`crawlcore::metrics::Requests`], shared with the other
-//! engines so every engine's `/metrics` uses the same names with only the prefix
-//! changed.
+//! The counters live in [`crawlcore::metrics::Requests`], shared with the
+//! other engines, so every engine's `/metrics` uses the same names with only
+//! the prefix changed.
 
 use std::sync::OnceLock;
 

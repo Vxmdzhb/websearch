@@ -1,27 +1,24 @@
-//! The clearnet HTTP/1.1 fetcher — where the SSRF gate reaches a socket.
+//! The clearnet HTTP/1.1 fetcher: where the SSRF gate reaches a socket.
 //!
-//! What lives here is what is *clearnet-specific*: the crown jewel, the
-//! [`vet_addrs`] SSRF gate that turns a list of resolved addresses into
-//! [`SafeIp`]s (or refuses the whole host), the operator allow-list check
-//! [`authority_exempt`], the crawler's request defaults, and [`FetchResult`].
-//! The async socket orchestration on top of them — a TTL DNS cache, the pinned
-//! SSRF-checked connect, the redirect-following `fetch`, the keep-alive
-//! `Fetcher` — lands with the net tier in [`crate::fetcher`].
+//! What lives here is what's specific to the clearnet: the [`vet_addrs`] SSRF
+//! gate, which turns resolved addresses into [`SafeIp`]s (or refuses the whole
+//! host), the operator allow-list check [`authority_exempt`], the crawler's
+//! request defaults and [`FetchResult`]. The async side on top of them (a TTL
+//! DNS cache, the pinned SSRF-checked connect, the redirect-following
+//! `fetch`, the keep-alive `Fetcher`) is in [`crate::fetcher`].
 //!
-//! The HTTP/1.1 **wire layer** is deliberately no longer here. Request building,
-//! status-line / header / chunked-body parsing, `Content-Encoding` decompression,
-//! `Content-Type` parsing and body charset decoding are shared with
-//! `onioncrawler` in [`crawlcore::http`]: they were two independently-maintained
-//! copies until four framing / injection defects had each been found and fixed
-//! twice, once per copy (that module's doc names all four). Everything moved is
-//! re-exported below, so this module's public surface — and the import paths in
-//! `tests/xcheck_httpclient.rs` — are unchanged.
+//! The HTTP/1.1 **wire layer** (request building, status line, header and
+//! chunked-body parsing, `Content-Encoding` decompression, `Content-Type`
+//! parsing, charset decoding) is shared with `onioncrawler` in
+//! [`crawlcore::http`]; see that module for the bugs one copy avoids. It's
+//! re-exported below, so this module's public paths, and the imports in
+//! `tests/xcheck_httpclient.rs`, are unchanged.
 //!
-//! The Python reference (`websearch/httpclient.py`) speaks HTTP through the
-//! stdlib `http.client`, which the shared wire layer reproduces; the hand-rolled
-//! Python helpers (`_parse_content_type`, `_decompress`, `_authority_exempt`, the
-//! `_ip_is_internal` / `_resolve_checked` SSRF gate) are cross-checked
-//! byte-identical in `tests/xcheck_httpclient.rs`.
+//! The Python version (`websearch/httpclient.py`) speaks HTTP through the
+//! standard `http.client`, which the shared wire layer reproduces; its own
+//! helpers (`_parse_content_type`, `_decompress`, `_authority_exempt`, the
+//! `_ip_is_internal` / `_resolve_checked` SSRF gate) are cross-checked byte
+//! for byte in `tests/xcheck_httpclient.rs`.
 
 use crate::ssrf::SafeIp;
 use std::fmt;
@@ -76,7 +73,7 @@ impl fmt::Display for GateError {
     }
 }
 
-/// Vet a host's resolved addresses into [`SafeIp`]s — the crown-jewel SSRF gate.
+/// Vet a host's resolved addresses into [`SafeIp`]s — the SSRF gate.
 ///
 /// When `block_internal` is set and the authority is **not** `exempt`, every
 /// resolved address must clear [`SafeIp::from_ip`]; if *any* is internal the
@@ -107,8 +104,8 @@ pub fn vet_addrs(
         }
         Ok(out)
     } else {
-        // Exempt (operator-allow-listed) or the guard is off: accept as-is,
-        // including internal addresses, through the audit-visible escape hatch.
+        // Exempt (on the operator's allow-list) or the guard is off: accept as is,
+        // internal addresses included, through the visible escape hatch.
         Ok(addrs.iter().map(|&ip| SafeIp::exempt(ip)).collect())
     }
 }
@@ -139,7 +136,7 @@ pub fn authority_exempt(host: &str, port: u16, allow_hosts: &[String]) -> bool {
 /// `FetchResult`.
 #[derive(Debug, Clone)]
 pub struct FetchResult {
-    /// The originally-requested URL.
+    /// The URL that was originally requested.
     pub url: String,
     /// The final URL after redirects.
     pub final_url: String,
@@ -189,20 +186,16 @@ impl FetchResult {
 /// Send one request on `stream` and read one response, under this crate's
 /// `Content-Encoding` convention (see [`decompress`]).
 ///
-/// The framing itself — the head cap, the chunked reader with its
-/// [`crawlcore::budget::Budget`]-bounded chunk sizes, the content-length and
-/// read-to-EOF paths, the keep-alive decision — is
-/// [`crawlcore::http::perform_request`], shared with `onioncrawler`, so a
-/// framing fix lands once. The caller owns the stream lifecycle and has already
+/// The framing (head cap, chunked reader with
+/// [`crawlcore::budget::Budget`]-bounded chunks, content-length and
+/// read-to-EOF paths, keep-alive) is [`crawlcore::http::perform_request`],
+/// shared with `onioncrawler`. The caller owns the stream and has already
 /// taken it through the SSRF gate ([`vet_addrs`] → a pinned connect).
 ///
-/// This returns the shared future rather than `await`ing it inside an `async fn`
-/// of its own, and that is not a style choice: this fetch path is already several
-/// async layers deep, a debug-build future nests its callee's state inline, and
-/// wrapping it in one more `async fn` was enough to abort
-/// `net_multiworker::keep_alive_reuses_connections` with "thread has overflowed
-/// its stack". Forwarding the future keeps the frame exactly the size it was
-/// before the wire layer moved.
+/// This returns the shared future instead of awaiting it inside an `async fn`
+/// of its own: the fetch path is several async layers deep, a debug build
+/// nests each callee's state inline, and one more layer was enough to
+/// overflow the stack in `net_multiworker::keep_alive_reuses_connections`.
 ///
 /// # Errors
 /// [`HttpError`] on I/O failure or a malformed response.

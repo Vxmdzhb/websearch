@@ -327,7 +327,7 @@ pub async fn fetch(
 /// `(scheme, host, port)`, bounded at [`POOL_MAX_IDLE`] entries (least recently
 /// used evicted first) and swept of anything idle past [`POOL_IDLE_TIMEOUT`].
 /// A pooled connection is reused **only after its pinned
-/// address re-clears the [`vet_addrs`] gate** — the crown SSRF invariant, re-run
+/// address re-clears the [`vet_addrs`] gate** — the SSRF invariant, re-run
 /// on every hop even for a reused socket — and every fresh connect (and every
 /// redirect hop) still goes through [`resolve_checked`] + a pinned connect. So a
 /// pooled connection can never bypass the `&SafeIp` gate: it is dialed to a vetted
@@ -700,11 +700,10 @@ mod audit_regression {
         IpAddr::from([93, 184, 216, 34])
     }
 
-    /// AUDIT REGRESSION (MEDIUM). The pool gained an entry per `(scheme, host,
-    /// port)` and lost one only to a same-key `acquire` or `close()`, so it grew
-    /// with the number of authorities a crawl touched: 300 distinct authorities
-    /// took the process from 310 to 910 file descriptors and held them, and a
-    /// broad `--keep-alive` crawl ran out of descriptors after ~1000 hosts.
+    /// The connection pool must not grow with every authority a crawl touches.
+    /// Unbounded, 300 distinct authorities took the process from 310 to 910 file
+    /// descriptors, and a broad `--keep-alive` crawl ran out of descriptors after
+    /// ~1000 hosts.
     #[test]
     fn three_hundred_authorities_do_not_hold_three_hundred_sockets() {
         let mut pool: ConnPool<u32> = ConnPool::new(POOL_MAX_IDLE, POOL_IDLE_TIMEOUT);

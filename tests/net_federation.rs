@@ -46,27 +46,12 @@ fn serve_shard(listener: TcpListener, body: &'static str) -> tokio::task::JoinHa
 
 /// The down shard's address: `127.0.0.1` port 0.
 ///
-/// This used to be a scavenged ephemeral port — bind one, drop the listener,
-/// assume nothing takes it back. Something can: the competing binder is not some
-/// other test binary, since `cargo test` runs those one at a time, but the
-/// sibling test in *this* file. libtest runs up to `available_parallelism()`
-/// tests at once — 2 on the 2-core CI runner, and this binary holds exactly 2 —
-/// so `merges_ranks_and_collapses_cross_host_mirror` is binding its own pair of
-/// `127.0.0.1:0` shards at the same instant, out of the same ephemeral range,
-/// and either of them could be handed the number this one had just released.
-/// Any other process on the machine can take it too. If one did, the "down"
-/// shard would be up. The test mostly survived that (a squatter's reply is not
-/// federation JSON, so the shard still counts as failed) but not for the reason
-/// it claims to be testing.
-///
-/// Port 0 removes the race rather than narrowing it: it is not a usable
-/// destination port, and no process can come to occupy it, because `bind(0)`
-/// means "assign me an ephemeral port" and never yields port 0 itself. The
-/// kernel refuses the connect immediately — measured here as
-/// `connect:Connection refused (os error 111)` in ~0.3 ms — so the shard still
-/// fails the way the assertions below describe, at `connect`, having gone
-/// through URL parse and resolution first, and costs no wall clock waiting on
-/// the 2 s fetch timeout.
+/// Port 0 can't be listened on: `bind(0)` means "assign me a port" and never
+/// yields 0 itself, so nothing can ever answer there, and the kernel refuses
+/// the connect at once (~0.3 ms). The shard fails at `connect`, after URL
+/// parsing and resolution, without waiting for the 2 s fetch timeout. A port
+/// found by binding and releasing could be taken by the other test in this
+/// file, which binds its own shards in parallel.
 const DEAD_SHARD: &str = "http://127.0.0.1:0";
 
 // Shard A: one high-scoring result on host `a.example`. Its SimHash and shard

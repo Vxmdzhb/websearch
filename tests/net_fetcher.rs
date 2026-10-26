@@ -2,7 +2,7 @@
 //! pipeline (net feature) against a mock HTTP server — no external network.
 //! Exercises `perform_request` (content-length, chunked, gzip) and
 //! `fetcher::fetch` end-to-end (resolve → SSRF gate → pinned connect → request →
-//! response → one-hop redirect), and — the crown jewel — that a loopback
+//! response → one-hop redirect), and, most importantly, that a loopback
 //! (internal) address is REFUSED by default and only reachable through the
 //! explicit `allow_hosts` exemption.
 #![cfg(feature = "net")]

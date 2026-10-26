@@ -30,10 +30,10 @@ fn sv(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| (*s).to_string()).collect()
 }
 
-/// The ASCII / diacritic-free corpus, byte-for-byte the `DOCS` list built in
-/// `gen_suggest()` (`index.connect(":memory:")` + `upsert_document`). Term
-/// document-frequencies are engineered (repeats across docs) so the `doc DESC,
-/// term ASC` ordering of `vocab_prefix` is exercised, not incidental.
+/// The ASCII, diacritic-free corpus: exactly the `DOCS` list built in
+/// `gen_suggest()` (`index.connect(":memory:")` + `upsert_document`). Document
+/// frequencies are set up on purpose (repeats across documents) so that
+/// `vocab_prefix`'s `doc DESC, term ASC` ordering is really exercised.
 const DOCS: &[(&str, &str, &str, &str)] = &[
     (
         "http://h/1",

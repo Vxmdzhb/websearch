@@ -58,13 +58,12 @@ fn empty_server() -> Arc<SearchServer> {
     ))
 }
 
-/// AUDIT REGRESSION (HIGH). The accept loop had no read deadline: a request head
-/// with no blank line (`GET / HTTP/1.1\r\n` then silence) left `sock.read` awaiting
-/// for good. 500 such connections were all still open after 2 s, at 1311 process
-/// fds, with nothing in the code that would ever reap them.
+/// The accept loop must have a read deadline. Without one, a request head
+/// with no blank line (`GET / HTTP/1.1\r\n` then silence) waits forever: 500
+/// such connections were all still open after 2 s, at 1311 file descriptors.
 ///
-/// With the deadline the server closes the connection on its own, so the client's
-/// read hits EOF. Without it, the read below never completes and the outer timeout
+/// With the deadline the server closes the connection itself and the client's
+/// read hits EOF. Without it, the read never completes and the outer timeout
 /// fires.
 #[tokio::test]
 async fn a_half_open_request_is_closed_by_the_deadline() {
@@ -90,10 +89,9 @@ async fn a_half_open_request_is_closed_by_the_deadline() {
     handle.abort();
 }
 
-/// AUDIT REGRESSION (HIGH). `tokio::spawn` per connection was unbounded, so the
-/// number of live tasks and fds was whatever a client asked for. The permit is now
-/// taken before `accept()`, so with a cap of 1 a second connection is not even
-/// accepted until the first finishes.
+/// Connections must be capped: the permit is taken before `accept()`, so with
+/// a cap of 1 a second connection isn't even accepted until the first is
+/// done.
 #[tokio::test]
 async fn the_connection_cap_defers_the_next_accept() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -108,32 +106,23 @@ async fn the_connection_cap_defers_the_next_accept() {
     let mut hog = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     hog.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
 
-    // `connect` returning says nothing about the server having accepted it: the
-    // kernel completes the handshake into the listen backlog on its own, so at
-    // this point `hog` may still be queued and the only permit unspent. What the
-    // fixed 150 ms sleep that used to stand here was waiting for is the server
-    // task reaching `acquire_owned().await` and `accept()`ing `hog` — scheduler
-    // latency, guessed at rather than observed, and a loaded 2-core runner can
-    // exceed the guess.
+    // `connect` returning doesn't mean the server accepted it: the kernel
+    // completes the handshake into the listen backlog on its own, so `hog` may
+    // still be queued and the only permit unspent. Rather than sleep and hope,
+    // wait for the observable effect: send a complete request on a throwaway
+    // connection and see whether it gets answered. A reply means the accept loop
+    // is still serving; a read timeout means it isn't, which is the state the
+    // assertion below needs.
     //
-    // Wait for the observable effect instead: send a complete, well-formed
-    // request on a throwaway connection and see whether it is answered. A reply
-    // means the accept loop is still serving new connections; a read that times
-    // out means it is not, which is the state the assertion below needs.
+    // The timeout shows the loop isn't serving anyone, not *why*: under load the
+    // server task might just not be scheduled yet. The assertion holds either
+    // way, because the backlog is FIFO: `hog` was queued first and, once
+    // accepted, holds the only permit for its full 30 s `request_timeout`, so
+    // `second` can't be served before it.
     //
-    // Being candid about what this does and does not establish: the timeout
-    // proves the loop is not currently serving anyone, not *why*. Under enough
-    // load the reason could be that the server task has simply not been
-    // scheduled yet rather than that the cap is spent. Either way the assertion
-    // that follows holds, because the backlog is FIFO — `hog` was queued first
-    // and, once accepted, owns the only permit for its full 30 s
-    // `request_timeout` — so `second` cannot be served ahead of it.
-    //
-    // Each probe is dropped at the end of its iteration. That matters: a probe
-    // left open sits in the backlog ahead of `second`, and a probe holding the
-    // permit with no complete head would park there for the whole
-    // `request_timeout`. Sending the head and closing means the drain below
-    // disposes of it immediately.
+    // Each probe is dropped at the end of its iteration: one left open would sit
+    // in the backlog ahead of `second`, and one holding the permit with an
+    // incomplete head would wait out the whole `request_timeout`.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let mut probe = TcpStream::connect(("127.0.0.1", port)).await.unwrap();

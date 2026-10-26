@@ -288,16 +288,13 @@ impl DocDerived {
     }
 }
 
-/// The whole corpus's text-derived state, tagged with the [`Index`] generation it
-/// was built from.
+/// The whole corpus's text-derived state, tagged with the [`Index`]
+/// generation it was built from.
 ///
-/// It exists because both readers used to rebuild it per request, under the
-/// global index mutex: `build_vocab()` re-tokenised the entire corpus on EVERY
-/// `/suggest` (twice when the fuzzy pass runs), and `search()` re-tokenised and
-/// re-lowercased every document on EVERY query. On a *small* 200-document ×
-/// 100 kB corpus that measured 923 ms for `/suggest?q=lor` and 790 ms for
-/// `/search?q=lorem` — and `/suggest` is a per-keystroke typeahead with no rate
-/// limit, so one person typing costs the whole server.
+/// Building it per request, under the global index mutex, is too slow:
+/// re-tokenising every document took 923 ms for `/suggest?q=lor` and 790 ms
+/// for `/search?q=lorem` on a small corpus (200 documents of 100 kB), and
+/// `/suggest` runs on every keystroke.
 pub(crate) struct Derived {
     generation: u64,
     pub(crate) docs: HashMap<i64, DocDerived>,
@@ -305,28 +302,24 @@ pub(crate) struct Derived {
     pub(crate) vocab: BTreeMap<String, u32>,
 }
 
-/// Which keys have been written since the last flush — the *change*, so a
-/// segmented store can persist it without persisting the corpus.
+/// Which keys have been written since the last flush: the *change*, so a
+/// segmented store can save it without saving the corpus.
 ///
-/// # Why this exists
+/// `snapshot()` answers "what does the index hold?". This answers "what
+/// changed since you last asked?", which is what lets a crawl that adds 100
+/// documents to a million-document index write 100 documents.
 ///
-/// `snapshot()` answers "what does the index hold?". Nothing answered "what has
-/// changed since you last asked?", so the only honest way to persist was to write
-/// everything — which is why a crawl that adds 100 documents to a million-document
-/// index rewrites a million documents, and why saves are therefore rare, and why a
-/// crash between them costs the whole run. This log is the missing question.
-///
-/// The sets are of *keys*, not of records: the records are read out of the index
-/// at flush time. So the log costs a `BTreeSet` entry per touched key and is
-/// emptied by [`Index::drain_changes`] on every flush — its size is a batch, not a
-/// corpus.
+/// The sets hold *keys*, not records; the records are read from the index at
+/// flush time. So the log costs a `BTreeSet` entry per touched key and is
+/// emptied by [`Index::drain_changes`] on every flush: its size is a batch,
+/// not a corpus.
 ///
 /// Ranking signals are tracked **separately** from document text
-/// ([`DirtyLog::ranks`] vs [`DirtyLog::docs`]) and that separation is the point:
-/// `finalize()` changes `incoming`/`rank`/`host_rank` on every document in the
-/// corpus. If those rode along in the document record, every finalize would
-/// rewrite every document body — a full snapshot by another name. Split out, a
-/// finalize writes ~40 bytes per document instead of a page of text.
+/// ([`DirtyLog::ranks`] vs [`DirtyLog::docs`]), on purpose: `finalize()`
+/// changes `incoming`/`rank`/`host_rank` on every document. If those were
+/// part of the document record, every finalize would rewrite every document
+/// body. Kept apart, a finalize writes ~40 bytes per document instead of a
+/// page of text.
 #[derive(Default)]
 pub(crate) struct DirtyLog {
     /// Documents whose stored fields changed (`d|url` records).
@@ -460,16 +453,16 @@ impl Index {
     // ---- incremental persistence: the change log ---------------------------
 
     /// Start (or stop) recording which keys each write touches, so
-    /// [`crate::segindex`] can persist the change rather than the corpus.
+    /// [`crate::segindex`] can save the change rather than the corpus.
     ///
-    /// Off by default. Turning it on marks **everything currently in the index**
-    /// dirty, which is the only safe answer: a store that started tracking
-    /// half-way through would flush a batch that silently omitted whatever came
-    /// before it, and the omission would only surface as a document that stopped
-    /// being findable after a restart. Turning it off clears the log.
+    /// Off by default. Turning it on marks **everything already in the index**
+    /// dirty, the only safe choice: tracking that started half-way would flush a
+    /// batch missing whatever came before, and that would only show up as a
+    /// document that can't be found after a restart. Turning it off clears the
+    /// log.
     ///
-    /// This changes no observable behaviour of any read — `snapshot`, `search`,
-    /// `stats` and the goldens are untouched by it.
+    /// Reads aren't affected: `snapshot`, `search`, `stats` and the goldens are
+    /// unchanged by it.
     pub fn track_changes(&mut self, on: bool) {
         self.tracking = on;
         self.dirty = DirtyLog::default();
@@ -1125,12 +1118,12 @@ impl Index {
     // reproduced — the documented "behaviourally faithful" standard).
 
     /// The term dictionary: `term -> document frequency`. For each document the
-    /// DISTINCT term set across `title` + `description` + `body` is taken (so a
-    /// term repeated within or across a document's fields counts that document
-    /// once), and every such term's count is incremented by one.
+    /// distinct terms across `title`, `description` and `body` are taken (a term
+    /// repeated within or across fields counts the document once), and each one's
+    /// count goes up by one.
     ///
-    /// Served from the [`Derived`] memo: it used to be rebuilt from the raw corpus
-    /// on every call, and `/suggest` calls it up to twice per keystroke.
+    /// Served from the [`Derived`] memo; `/suggest` asks for it up to twice per
+    /// keystroke.
     fn build_vocab(&self) -> Arc<Derived> {
         self.derived()
     }
@@ -1546,9 +1539,9 @@ impl<'a> Reader<'a> {
         Reader { buf, pos: 0 }
     }
 
-    /// Whether every byte has been consumed — the check a fixed-shape record
-    /// decoder wants at the end, so trailing junk is a decode failure rather than
-    /// something silently ignored.
+    /// Whether every byte has been consumed: the check a fixed-shape record
+    /// decoder makes at the end, so trailing junk fails the decode instead of
+    /// being ignored.
     pub(crate) fn is_at_end(&self) -> bool {
         self.pos == self.buf.len()
     }
@@ -2172,10 +2165,10 @@ mod audit_regression {
         );
     }
 
-    /// AUDIT REGRESSION (MEDIUM). Caching the tokenisation is only safe if a write
-    /// invalidates it. Re-indexing a URL with different text must change both what
-    /// `search` matches and what the `/suggest` vocabulary offers — in the same
-    /// process, with no other signal that anything moved.
+    /// Caching the tokenisation is only safe if writes invalidate it.
+    /// Re-indexing a URL with different text must change both what `search`
+    /// matches and what `/suggest` offers, in the same process, with nothing else
+    /// signalling the change.
     #[test]
     fn a_text_change_invalidates_the_derived_cache() {
         let mut ix = Index::new();
@@ -2269,9 +2262,9 @@ mod audit_regression {
         );
     }
 
-    /// AUDIT REGRESSION (MEDIUM). The store's own guard against a link bomb: even
-    /// if a caller forgets its per-page cap, one `add_links` call cannot put more
-    /// than [`MAX_EDGES_PER_CALL`] owned URL pairs into the graph, and it says how
+    /// The store's own guard against link bombs: even if a caller forgets its
+    /// per-page cap, one `add_links` call can't put more than
+    /// [`MAX_EDGES_PER_CALL`] owned URL pairs into the graph, and it reports how
     /// many it refused.
     #[test]
     fn add_links_caps_one_pages_edges_and_reports_the_refusals() {
@@ -2290,12 +2283,9 @@ mod audit_regression {
         assert_eq!(ix2.stats().links, 40);
     }
 
-    /// AUDIT REGRESSION (MEDIUM). The cost of a query must not scale with the
-    /// corpus every time. This is self-calibrating rather than a wall-clock
-    /// threshold: the FIRST query pays the corpus tokenisation, and ten further
-    /// queries must together cost less than that one — before the cache each of
-    /// the ten paid it again in full (measured: `/search?q=lorem` 790 ms and
-    /// `/suggest?q=lor` 923 ms on a 200-document × 100 kB corpus, per request).
+    /// A query's cost must not scale with the corpus every time. Self-calibrating
+    /// rather than a wall-clock threshold: the first query pays for tokenising the
+    /// corpus, and ten more queries together must cost less than that one.
     #[test]
     fn repeat_queries_do_not_re_tokenise_the_corpus() {
         let body = "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(400); // ~21 kB

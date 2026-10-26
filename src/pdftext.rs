@@ -1,38 +1,34 @@
-//! Optional, best-effort, dependency-free PDF text extraction — a faithful,
-//! byte-for-byte port of the Python `websearch.pdftext`.
+//! Optional, best-effort, dependency-free PDF text extraction: a byte-exact
+//! port of the Python `websearch.pdftext`.
 //!
-//! It inflates `/FlateDecode` content streams (via the stdlib-only
+//! It inflates `/FlateDecode` content streams (with the standard-library-only
 //! [`crawlcore::inflate`]) and pulls text out of the `(...)` / `<...>` string
-//! operands of the text-showing operators inside `BT`/`ET` blocks — which
-//! covers the common "text-first" PDF produced by ordinary tooling.
+//! operands of the text-showing operators inside `BT`/`ET` blocks, which
+//! covers the common text-first PDF made by ordinary tools.
 //!
-//! It does NOT implement font encodings / CID fonts, embedded-image OCR, or
+//! It doesn't handle font encodings and CID fonts, OCR of embedded images, or
 //! encrypted PDFs; for those it returns whatever plain text it can recover, or
-//! `""`. Nothing here fakes a result: if extraction finds no text, the caller
-//! simply skips the page.
+//! `""`, and the caller skips the page.
 //!
-//! # Byte-identity with the Python reference
+//! # Byte-identity with the Python version
 //!
-//! Every cap, the escape/octal handling, the operator handling and the
-//! joining/whitespace rules mirror the Python module exactly (see
-//! `tests/xcheck_pdftext.rs`, which drives the real Python on the same bytes).
+//! Every cap, the escape and octal handling, the operators and the joining
+//! and whitespace rules match the Python module exactly (see
+//! `tests/xcheck_pdftext.rs`, which runs the real Python on the same bytes).
 //! PDF strings are byte strings; like Python (`.decode("latin-1", "replace")`)
-//! we map each byte `b` to the code point `U+00bb` — so every recovered
-//! character is `<= U+00FF`. The whitespace class used by `strip()` / `\s`
-//! is Python's, which (unlike Rust's `char::is_whitespace`) also treats the
-//! information separators `0x1C..=0x1F` as whitespace; [`is_py_ws`] reproduces
-//! that set.
+//! each byte `b` maps to the code point `U+00bb`, so every recovered character
+//! is `<= U+00FF`. The whitespace class for `strip()` / `\s` is Python's,
+//! which (unlike Rust's `char::is_whitespace`) includes the information
+//! separators `0x1C..=0x1F`; [`is_py_ws`] reproduces it.
 //!
-//! ## The one non-byte-identical edge (documented, not faked)
+//! ## The one difference
 //!
 //! Python's `zlib.decompressobj().decompress(data, cap)` verifies the trailing
-//! Adler-32 when a stream fully inflates under the cap, raising (→ `b""`) on a
-//! bad checksum. [`crawlcore::inflate::inflate_zlib`] parses past the trailer
-//! without verifying it, so a stream whose DEFLATE body is valid but whose
-//! Adler-32 trailer is corrupt would yield text here where Python yields `""`.
-//! This cannot be produced by `zlib.compress(...)` (which writes a correct
-//! trailer), so it never arises for real PDFs or for the cross-check fixtures;
-//! it is noted here for honesty rather than reproduced.
+//! Adler-32 when a stream fully inflates under the cap, and gives `b""` on a
+//! bad checksum. [`crawlcore::inflate::inflate_zlib`] doesn't verify it, so a
+//! valid DEFLATE body with a corrupt Adler-32 yields text here and `""` there.
+//! `zlib.compress(...)` always writes a correct trailer, so this doesn't occur
+//! in real PDFs or in the cross-check fixtures.
 
 use crawlcore::budget::Budget;
 use crawlcore::inflate::inflate_zlib;
@@ -515,25 +511,16 @@ mod audit_regression {
         out
     }
 
-    /// AUDIT REGRESSION (LOW). `extract_from_stream` used to collect EVERY
-    /// fragment of an inflated stream into a `Vec<String>` before `extract_text`'s
-    /// `max_chars` could refuse any of them. A 12 kB PDF inflating to 8 MB of
-    /// `(a)Tj` is ~2.6 million one-character `String`s: peak RSS went 20 MB →
-    /// 122 MB, about 10 000× the input, and once per `--workers` worker.
+    /// `extract_from_stream` must not build every fragment of an inflated stream
+    /// before `extract_text`'s `max_chars` can stop it. A 12 kB PDF inflating to
+    /// 8 MB of `(a)Tj` is ~2.6 million one-character `String`s: 20 MB → 122 MB of
+    /// memory, per worker.
     ///
-    /// The observable is the number of fragments BUILT, counted by the iterator
-    /// itself, which is the property word for word: under a 100-character cap 50
-    /// of the 400 000 fragments are built, and without one, all 400 000. Eagerly,
-    /// both runs build all 400 000.
-    ///
-    /// This was a stopwatch — `capped * 3 < uncapped` over the two extractions —
-    /// and it failed for real (run 7 of a 40-run loop: 134 ms against 379 ms). The
-    /// capped side does 1/8000 of the work, so it is a sub-millisecond
-    /// measurement, and one scheduler preemption on a loaded two-core runner adds
-    /// a whole quantum to it while leaving the uncapped side unmoved in relative
-    /// terms; the 3× ratio was well inside that noise. The counts are 50 against
-    /// 400 000 on any machine, and the eager failure mode lands at 400 000 against
-    /// 400 000 — nothing about the schedule can move either number.
+    /// What's counted is the number of fragments built, by the iterator itself:
+    /// under a 100-character cap 50 of the 400 000 fragments are built, without
+    /// one all 400 000. An eager implementation builds 400 000 either way. Counts,
+    /// not a stopwatch: the capped side is sub-millisecond, and one preemption on
+    /// a busy runner would swamp it.
     #[test]
     fn the_char_cap_stops_extraction_instead_of_trimming_it_afterwards() {
         let pdf = pdf_of_tj(400_000);
@@ -552,9 +539,8 @@ mod audit_regression {
         assert_eq!(uncapped, 400_000);
     }
 
-    /// The mechanism, asserted directly: producing one fragment must not consume
-    /// the stream. (Before the fix the function returned a `Vec` — there was no
-    /// position to inspect, because the whole body had already been walked.)
+    /// The mechanism, checked directly: producing one fragment must not consume
+    /// the stream.
     #[test]
     fn one_fragment_does_not_walk_the_whole_stream() {
         let body = b"BT (a)Tj "

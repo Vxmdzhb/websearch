@@ -1,51 +1,48 @@
-//! The `websearch` command-line entrypoint — a dependency-free port of the Python
-//! `python3 -m websearch` CLI (`legacy-python/websearch/websearch/__main__.py`).
+//! The `websearch` command-line entrypoint, a dependency-free port of the
+//! Python `python3 -m websearch` CLI.
 //!
-//! Four subcommands drive the library: `crawl` seeds a [`Crawler`], runs it, and
-//! [`Index::snapshot`]s the result to `--db`; `serve` [`Index::restore`]s that
-//! snapshot and runs the no-JS [`SearchServer`]; `stats` restores and prints the
-//! index statistics; `backup` restores and writes a fresh snapshot to `--out`.
+//! Four subcommands drive the library: `crawl` seeds a [`Crawler`], runs it,
+//! and [`Index::snapshot`]s the result to `--db`; `serve` [`Index::restore`]s
+//! that snapshot and runs the no-JS [`SearchServer`]; `stats` prints the index
+//! statistics; `backup` writes a fresh snapshot to `--out`.
 //!
-//! `crawl` normally starts from an EMPTY index and overwrites `--db` with the
-//! run's result — where the Python crawls straight into a persistent SQLite file.
-//! `crawl --recrawl` is the one path that restores `--db` first, because its whole
-//! job is to refetch what is already indexed ([`Crawler::enqueue_recrawls`]); that
-//! run extends the restored index rather than replacing it.
+//! `crawl` normally starts from an empty index and overwrites `--db` with the
+//! run's result (the Python version crawls straight into a persistent SQLite
+//! file). `crawl --recrawl` is the one path that restores `--db` first,
+//! because its job is to refetch what's already indexed
+//! ([`Crawler::enqueue_recrawls`]); that run extends the restored index.
 //!
-//! # `--store=blob` (default) versus `--store=segments`
+//! # `--store=blob` (default) and `--store=segments`
 //!
-//! Everything above describes `--store=blob`, which is unchanged and is what a
-//! command line that does not mention `--store` gets, byte for byte.
+//! Everything above describes `--store=blob`, which is what you get without
+//! `--store`.
 //!
 //! `--store=segments` makes `--db` a **directory** ([`crate::segindex`] over
 //! [`crawlcore::segstore`]) instead of a snapshot file, and changes two things:
 //!
 //! * the crawl commits a segment every `--flush-every` pages instead of saving
-//!   once at the end, so an interrupted run loses that many pages rather than all
-//!   of them ([`segindex::crawl_into`]);
-//! * a plain `crawl` **resumes** the directory instead of replacing it, because
-//!   resuming is the reason the layout exists — see the `StoreKind` docs below.
+//!   once at the end, so an interrupted run loses at most that many pages
+//!   ([`segindex::crawl_into`]);
+//! * a plain `crawl` **resumes** the directory instead of replacing it,
+//!   because resuming is what the layout is for (see `StoreKind` below).
 //!
-//! `serve`, `stats` and `backup` take the same flag and read whichever layout it
-//! names; `backup --out` is always a single snapshot file, so it is also the way
-//! back out of a segmented store.
+//! `serve`, `stats` and `backup` take the same flag and read whichever layout
+//! it names; `backup --out` always writes a single snapshot file, so it's
+//! also the way back from a segmented store.
 //!
-//! `serve` builds the server with [`SearchServer::new`], i.e. WITHOUT a frontier
-//! handle, so its `/about` page omits the Frontier table: `--db` is an
-//! [`Index::snapshot`], and that format carries documents only — the frontier
-//! lives in the crawler process and is never persisted, where the Python's
-//! frontier shares the index's SQLite file and so is always readable from
-//! `serve`. A server that DOES hold a live [`websearch::Frontier`] (an in-process
-//! crawl + serve) renders the table via [`SearchServer::with_frontier`].
+//! `serve` builds the server with [`SearchServer::new`], without a frontier
+//! handle, so its `/about` page has no Frontier table: a snapshot holds
+//! documents only, and the frontier lives in the crawler process. A server
+//! that does hold a live [`websearch::Frontier`] (crawl and serve in one
+//! process) shows the table via [`SearchServer::with_frontier`].
 //!
-//! Not ported from the Python CLI: `serve`'s `--rate`/`--burst`/`--auth`
-//! (the server has neither a rate limiter nor HTTP Basic auth — see the
+//! Not ported from the Python CLI: `serve`'s `--rate`/`--burst`/`--auth` (the
+//! server has no rate limiter and no HTTP Basic auth; see the
 //! [`websearch::serve`] module docs) and the `fed-serve` subcommand.
 //!
-//! The whole binary is gated behind the crate's `net` feature (see the `[[bin]]`
-//! `required-features` in `Cargo.toml`), so the default `websearch` build stays a
-//! pure, zero-dependency library. Argument parsing is hand-rolled — no `clap`, no
-//! third-party crate — to keep that guarantee.
+//! The binary needs the crate's `net` feature (`required-features` on the
+//! `[[bin]]` in `Cargo.toml`), so the default build stays a pure library with
+//! no dependencies. Argument parsing is hand-written, no `clap`.
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -68,21 +65,17 @@ const PROG: &str = "websearch";
 
 /// Which persistence layout `--db` names.
 ///
-/// The two are genuinely different things on disk and behave differently, so
-/// this is a mode, not a tuning knob:
+/// The two are different things on disk and behave differently, so this is a
+/// mode, not a tuning knob:
 ///
-/// * `Blob` — `--db` is a FILE holding one [`Index::snapshot`]. Written once, at
-///   the end of the run, by rename. Simple, and every existing test, golden and
-///   deployment speaks it, which is why it stays the default.
-/// * `Segments` — `--db` is a DIRECTORY of immutable segments plus a manifest
-///   ([`websearch::segindex`]). Written continuously, a batch at a time, so a
-///   `SIGKILL` costs one batch instead of the run; and a crawl over an existing
-///   directory RESUMES it rather than replacing it.
-///
-/// That last difference is deliberate and is the reason the flag exists: a
-/// segmented crawl that threw the store away on every start would be a blob store
-/// with extra files. `--store=blob` keeps the old "a plain crawl overwrites `--db`"
-/// behaviour exactly, byte for byte.
+/// * `Blob`: `--db` is a file holding one [`Index::snapshot`], written once,
+///   at the end of the run, by rename. Simple, and what every existing test,
+///   golden and deployment uses, so it stays the default.
+/// * `Segments`: `--db` is a directory of immutable segments plus a manifest
+///   ([`websearch::segindex`]), written a batch at a time, so a `SIGKILL`
+///   costs one batch instead of the run. A crawl over an existing directory
+///   resumes it rather than replacing it; that's the point of the mode.
+///   `--store=blob` keeps "a plain crawl overwrites `--db`" exactly as it was.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum StoreKind {
     /// One file, one blob, written once.
@@ -215,11 +208,9 @@ enum CliError {
 /// and exit codes — the point of routing them through one function rather than
 /// two copies of the parser that drift apart the first time a flag is added.
 pub fn run(args: impl Iterator<Item = String>) -> ExitCode {
-    // `--log-format` is handled before the subcommand parser so it works on
-    // every subcommand of every engine with one call site each, rather than
-    // being a flag an operator has to remember which subcommands happen to
-    // accept. It is removed from `argv`, so the parser below sees exactly the
-    // command line it saw before this flag existed.
+    // `--log-format` is handled before the subcommand parser, so it works on
+    // every subcommand, and it is removed from `argv`, so the parser below never
+    // sees it.
     let (log_format, argv) = match crawlcore::logfmt::take_format_flag(args.collect()) {
         Ok(v) => v,
         Err(msg) => {
@@ -907,11 +898,11 @@ async fn run_crawl(a: CrawlArgs) -> ExitCode {
             }
         }
     }
-    // Change tracking has to be on BEFORE the crawl writes anything, or the first
-    // flush has nothing to say and the batch is silently lost. `read_index_for`
-    // already turned it on with an EMPTY log (what it loaded is already durable);
-    // turning it on again here would mark the whole resumed corpus dirty and make
-    // the first flush rewrite it, so only do it if it is somehow off.
+    // Change tracking has to be on before the crawl writes anything, or the
+    // first flush would have nothing to write. `read_index_for` already turned
+    // it on with an empty log (what it loaded is already on disk); turning it on
+    // again would mark the whole resumed corpus dirty and make the first flush
+    // rewrite it, so only do it if it's off.
     if segmented.is_some() && !crawler.index().is_tracking_changes() {
         crawler.index_mut().track_changes(true);
     }

@@ -140,7 +140,7 @@ pub struct CrawlConfig {
     pub scope_hosts: Option<Vec<String>>,
     /// The crawler's `User-Agent`.
     pub user_agent: String,
-    /// The token used to select the robots.txt group.
+    /// The token used to pick the robots.txt group.
     pub robots_agent: String,
     /// Whether to obey robots.txt `Disallow`.
     pub respect_robots: bool,
@@ -277,9 +277,9 @@ pub struct CrawlStats {
     /// Unchanged (304) revalidations.
     pub unchanged: u64,
     /// Links discarded by the per-page cap ([`CrawlConfig::max_links_per_page`]
-    /// or [`crate::index::MAX_EDGES_PER_CALL`]). Reported rather than dropped
-    /// silently: a non-zero count is how an operator learns a host is serving
-    /// link bombs, and how they know the crawl's coverage of that page is partial.
+    /// or [`crate::index::MAX_EDGES_PER_CALL`]). Reported, not dropped silently:
+    /// a non-zero count tells the operator a host serves link bombs and that
+    /// coverage of that page is partial.
     pub links_dropped: u64,
 }
 
@@ -410,23 +410,20 @@ mod net_impl {
             added
         }
 
-        /// Re-queue every indexed URL that is due for a recrawl; returns how many
-        /// were queued.
+        /// Re-queue every indexed URL that is due for a recrawl; returns how many.
         ///
         /// "Due" means `fetched_at + interval <= now` ([`Index::due_for_recrawl`]).
-        /// Each due URL goes back into the frontier as `queued` at depth 0 with
-        /// reason `recrawl`, and its host's spent politeness budget is cleared so
-        /// the refetch is not blocked by it. The refetch itself is an ordinary
-        /// [`run`](Self::run) pass — a conditional GET from the stored validators,
-        /// through the same SSRF-checked connector as any other fetch. `interval`
-        /// of `None` uses [`CrawlConfig::recrawl_interval`].
+        /// Each due URL goes back into the frontier as `queued`, at depth 0, with
+        /// reason `recrawl`, and its host's spent politeness budget is cleared so the
+        /// refetch isn't blocked. The refetch is an ordinary [`run`](Self::run) pass:
+        /// a conditional GET with the stored validators, through the same
+        /// SSRF-checked connector as any fetch. An `interval` of `None` uses
+        /// [`CrawlConfig::recrawl_interval`].
         ///
-        /// This reads the crawler's OWN index, so a driver that wants to refresh a
-        /// previously persisted crawl must load that snapshot into
-        /// [`index_mut`](Self::index_mut) first (a fresh [`Crawler::new`] has an
-        /// empty index and therefore nothing due). Mirrors the Python
-        /// `Crawler.enqueue_recrawls`, which gets the same effect for free by
-        /// opening the persistent SQLite database.
+        /// This reads the crawler's own index, so to refresh a saved crawl, load the
+        /// snapshot into [`index_mut`](Self::index_mut) first (a fresh
+        /// [`Crawler::new`] has an empty index and nothing due). Mirrors the Python
+        /// `Crawler.enqueue_recrawls`, which gets this for free from its SQLite file.
         pub fn enqueue_recrawls(&mut self, interval: Option<f64>, now: f64) -> usize {
             let interval = interval.unwrap_or(self.cfg.recrawl_interval);
             let due = self.core.ix.due_for_recrawl(interval, now);
@@ -491,35 +488,27 @@ mod net_impl {
             self.pages_fetched
         }
 
-        /// Crawl at most `pages` MORE pages, then return.
+        /// Crawl at most `pages` more pages, then return.
         ///
-        /// # Why this exists
+        /// [`Crawler::run`] runs to exhaustion and its caller saves afterwards: right
+        /// when saving rewrites the corpus, but then a `SIGKILL` loses the whole run.
+        /// A segmented store's commits are cheap, so the driver crawls a little,
+        /// commits and repeats, and this is the "a little": the crash window becomes
+        /// a number the operator sets.
         ///
-        /// [`Crawler::run`] runs to exhaustion and its caller then saves. That is
-        /// fine when saving costs a corpus rewrite and you therefore only do it
-        /// once — and it is exactly what makes a `SIGKILL` mid-run lose the whole
-        /// run. A segmented store's commits are cheap, so the driver wants to
-        /// crawl a little, commit, and repeat; this is the "a little" that makes
-        /// the crash window a number an operator sets rather than the run length.
+        /// It's a method because the two run modes take their budget differently:
+        /// [`Crawler::run`] compares `max_pages` with the cumulative `pages_fetched`,
+        /// while the multi-worker path gets a fresh budget per call. Getting that
+        /// wrong in the caller would mean one slice and then nothing, or no limit at
+        /// all.
         ///
-        /// It exists as a method because the two run modes take their budget
-        /// differently and a caller should not have to know: [`Crawler::run`]
-        /// measures its `max_pages` against the cumulative `pages_fetched`, while
-        /// the multi-worker path allocates a fresh page budget per call. Both
-        /// mean "stop after `pages` more" once the argument is computed right, and
-        /// getting it wrong in the caller means either one slice and then silence,
-        /// or an unbounded crawl.
-        ///
-        /// Returns the run-to-date statistics, exactly as [`Crawler::run`] does;
-        /// they accumulate across slices, so the final slice's return value is the
-        /// whole run's.
+        /// Returns the statistics so far, like [`Crawler::run`]; they add up across
+        /// slices, so the last slice returns the whole run's.
         pub async fn run_slice(&mut self, pages: u64) -> CrawlStats {
-            // Compute the budget, THEN make exactly one call. Two `self.run(…)`
-            // calls in two branches of an `async fn` give the generated state
-            // machine room for two copies of `run`'s future, and `run`'s future is
-            // enormous in a debug build (it holds the whole fetch/parse/index
-            // pipeline). That doubling was measured overflowing a test thread's
-            // stack before this was one call.
+            // Compute the budget, then make exactly one call. Two `self.run(…)` calls in
+            // two branches give the generated state machine room for two copies of
+            // `run`'s future, which is huge in a debug build, and that overflowed a test
+            // thread's stack.
             let budget = if self.cfg.workers > 1 {
                 // The multi-worker path allocates a fresh page budget per call,
                 // so its argument is already "this many more".
@@ -873,13 +862,11 @@ mod net_impl {
             depth: i64,
             follow: bool,
         ) {
-            // The cap covers ACCEPTED links (canonical, in-scheme, not already
-            // seen on this page); the loop stops the moment it is spent, so a
-            // page of 100 000 `<a href=/N>` costs neither the canonicalisation of
-            // the tail nor the 100 000 frontier rows and graph edges it used to
-            // produce (+13 MB RSS for one page; ~6.5 GB over a 500-page host).
-            // (`crawlcore::budget::Budget` in full: this module has its own
-            // `Budget`, the atomic *page* budget shared by the workers.)
+            // The cap counts accepted links (canonical, right scheme, not already seen
+            // on this page), and the loop stops as soon as it's spent, so a page of
+            // 100 000 `<a href=/N>` costs neither canonicalising the rest nor 100 000
+            // frontier rows and graph edges. (Not `crawlcore::budget::Budget`: this
+            // module has its own `Budget`, the atomic *page* budget the workers share.)
             let mut budget = crawlcore::budget::Budget::new(if cfg.max_links_per_page == 0 {
                 usize::MAX
             } else {
@@ -1192,13 +1179,11 @@ mod net_impl {
             }
         }
 
-        /// AUDIT REGRESSION (MEDIUM). `enqueue_links` recorded EVERY extracted
-        /// edge and queued every in-scope one, whatever the page's size: a single
-        /// 1.9 MB page of `<a href=/N>` produced 100 000 frontier rows and 100 000
-        /// graph edges for +13 MB of RSS — and with the default `per_host_budget`
-        /// of 500 pages, ~6.5 GB from one host. Nothing about scope, depth, the
-        /// trap guards or federation bounds this, because the edge is recorded
-        /// before any of them are consulted.
+        /// Links per page must be capped. Without a cap, a single 1.9 MB page of
+        /// `<a href=/N>` makes 100 000 frontier rows and 100 000 graph edges (+13 MB of
+        /// memory), and with the default `per_host_budget` of 500 pages, ~6.5 GB from
+        /// one host. Scope, depth, the trap guards and federation don't help, because
+        /// the edge is recorded before any of them run.
         #[test]
         fn a_page_of_a_hundred_thousand_links_is_capped_and_counted() {
             let cfg = CrawlConfig {

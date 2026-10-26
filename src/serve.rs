@@ -237,11 +237,9 @@ impl Resp {
 
 /// The stylesheet served at `/style.css`.
 ///
-/// Byte-identical to the Python `websearch.server.STYLE`. It is kept verbatim
-/// (a raw string, newlines and all) rather than re-flowed, so a diff against
-/// the reference is trivial — an earlier hand-transcription silently dropped
-/// half the rules, which left the vertical tabs, the image grid, the pager and
-/// the stats tables unstyled.
+/// Byte-identical to the Python `websearch.server.STYLE`, kept as a raw
+/// string (newlines and all) rather than reformatted, so it's trivial to diff
+/// against the original.
 const STYLE: &str = r#"
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
@@ -352,15 +350,14 @@ fn header(q: &str) -> String {
     )
 }
 
-/// The OpenSearch description document served at `/opensearch.xml` and pointed
-/// at by every page's `<head>`, so a browser can add this engine to its address
-/// bar (and, through the suggestions URL, complete queries while typing there).
+/// The OpenSearch description served at `/opensearch.xml` and linked from
+/// every page's `<head>`, so a browser can add this engine (and, through the
+/// suggestions URL, complete queries in the address bar).
 ///
-/// Both variables are config-derived — the operator's site name and the base URL
-/// the node describes itself with — and both go through the XML escaper, not the
-/// HTML one: `ShortName` is displayed by the browser and a `&` in it would
-/// otherwise make the document unparseable and the engine silently unavailable.
-/// `{searchTerms}` is OpenSearch's own placeholder and must survive verbatim.
+/// Both values come from config (the site name and the node's base URL), and
+/// both go through the XML escaper, not the HTML one: browsers show
+/// `ShortName`, and a `&` in it would make the document unparseable.
+/// `{searchTerms}` is OpenSearch's own placeholder and must stay as is.
 fn opensearch_xml(base: &str, site_name: &str) -> String {
     let b = crate::atom::xml_text(base.trim_end_matches('/'));
     let name = crate::atom::xml_text(site_name);
@@ -1228,15 +1225,12 @@ impl SearchServer {
         Resp::suggestions(200, suggestions_json(&q, &terms))
     }
 
-    /// `/metrics` — Prometheus text exposition.
+    /// `/metrics`: Prometheus text.
     ///
-    /// Index gauges, the frontier depth, then the request block every engine in
-    /// the suite shares ([`crawlcore::metrics`]). `websearch_docs` and
-    /// `websearch_hosts` keep their exact names and values because `suitedash`'s
+    /// Index gauges, the frontier depth, then the request block every engine
+    /// shares ([`crawlcore::metrics`]). `websearch_docs`, `websearch_hosts` and
+    /// `websearch_searches_total` keep these exact names, because `suitedash`'s
     /// default configuration and the dashboards key on them.
-    /// `websearch_searches_total` is the third name that configuration asks for
-    /// (`suitedash::config::default_services`) and that nothing used to emit —
-    /// the dashboard has been rendering a permanent blank for it.
     fn metrics(&self) -> Resp {
         let (docs, hosts) = {
             let ix = self.index.lock().expect("index mutex");
@@ -1362,8 +1356,8 @@ mod net_impl {
             // (and hold an fd for) every connection ever offered.
             let permit = match Arc::clone(&sem).acquire_owned().await {
                 Ok(p) => p,
-                // The semaphore is never closed; if that ever changes, stopping is
-                // the only safe reading — an unbounded accept loop is the bug.
+                // The semaphore is never closed; if that ever changes, stopping is the only
+                // safe reading, since an accept loop without the cap is the bug.
                 Err(_) => return Ok(()),
             };
             let (sock, peer) = listener.accept().await?;
@@ -1760,9 +1754,8 @@ mod tests {
         assert_eq!(render_results("cats", &resp(7), 1, "news", 0.25), "<main><div class=wrap><div class=tabs><a class='tab' href='/search?q=cats'>Web</a><a class='tab active' href='/search?type=news&amp;q=cats'>News</a><a class='tab' href='/images?q=cats'>Images</a><a class='tab' href='/videos?q=cats'>Videos</a><a class='tab' href='/search?type=files&amp;q=cats'>Files</a></div><div class=meta>About 7 results (0.250 seconds)</div><p class=empty>No pages matched <strong>cats</strong>. Try fewer or different terms.</p><footer><a href='/about'>About &amp; stats</a> &middot; <a href='/api/search?q=cats'>JSON API</a></footer></div></main>");
     }
 
-    /// The regression itself, end to end through [`SearchServer::route`]: paging
-    /// inside a vertical must STAY in that vertical. Before the fix every pager
-    /// href was `q=…&page=N`, so "Next" dropped `type=` and landed on plain Web.
+    /// End to end through [`SearchServer::route`]: paging inside a vertical must
+    /// stay in that vertical (every pager href keeps `type=`).
     #[test]
     fn route_pager_preserves_the_vertical() {
         // 12 docs => 2 pages of 10, so the pager renders. They are PDFs so they
@@ -1816,9 +1809,9 @@ mod tests {
         assert!(!web.contains("type=news&page="));
     }
 
-    /// The clock is real, and it reaches both surfaces: the HTML meta line prints
-    /// a `%.3f` number of seconds and the JSON carries a numeric
-    /// `elapsed_seconds` — neither is the old hardcoded zero-literal.
+    /// The clock is real and reaches both outputs: the HTML meta line prints a
+    /// `%.3f` number of seconds and the JSON carries a numeric
+    /// `elapsed_seconds`, neither of them a constant zero.
     #[test]
     fn route_renders_measured_elapsed() {
         let srv = server_with_docs();
@@ -1993,12 +1986,10 @@ mod audit_regression {
         }
     }
 
-    /// AUDIT REGRESSION (LOW). `href`/`src` were HTML-escaped but never scheme-
-    /// checked, so a stored `page_url` of `javascript:alert(1)` rendered verbatim
-    /// as `href='javascript:alert(1)'` — escaping does nothing to a URL scheme.
-    /// Unreachable through today's crawler (it canonicalises to http(s)), but
-    /// `federation.rs` takes shard-supplied URLs as given, and the whole defence
-    /// otherwise sits upstream of the renderer.
+    /// `href`/`src` must be scheme-checked, not just HTML-escaped: escaping does
+    /// nothing to a `javascript:` URL. Today's crawler only stores http(s), but
+    /// `federation.rs` takes shard-supplied URLs as given, so the renderer has to
+    /// defend itself.
     #[test]
     fn a_javascript_url_is_not_rendered_as_a_link() {
         for bad in [
@@ -2246,9 +2237,8 @@ title='Nodetest' href=/opensearch.xml>"
         }
     }
 
-    /// A site name with XML metacharacters cannot break the descriptor — it is a
-    /// config value, and a `&` in it would otherwise make the document
-    /// unparseable and the engine silently un-addable.
+    /// A site name with XML metacharacters can't break the descriptor: a `&` in
+    /// the config value would otherwise make the document unparseable.
     #[test]
     fn a_hostile_site_name_cannot_break_the_descriptor() {
         let srv = SearchServer::new(Arc::new(Mutex::new(Index::new())), "http://s/&<>")

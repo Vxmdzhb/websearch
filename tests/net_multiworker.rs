@@ -226,27 +226,17 @@ async fn multiworker_keep_alive_indexes_same_set() {
     assert_indexed_the_allowed_set(&cr, port, &stats);
 }
 
-// Two worker threads, not four. Two is the smallest count that makes what this
-// test exists to show happen at all: two crawl workers running at the same
-// instant on different CPUs, genuinely contending for the shared frontier/index
-// mutex. On one thread the four worker tasks only interleave cooperatively,
-// which is what the `#[tokio::test]` cases above already cover. Going past two
-// does not sharpen the property — the contention is already real at two — and on
-// the 2-core CI runner there is no third CPU to run a third thread on, so the
-// extra two threads bought nothing here and only took scheduling away from work
-// that needed it. Not from the other test binaries: `cargo test` runs those one
-// at a time, each to completion, so none of them is alive while this one is. From
-// this binary's own work. libtest runs up to `available_parallelism()` tests
-// concurrently — 2 on that runner — so this test is sharing the two cores with
-// one of the seven `current_thread` cases around it, and with the mock server's
-// tasks on its own runtime.
+// Two worker threads: the smallest number that makes two crawl workers run
+// at the same moment on different CPUs, really contending for the shared
+// frontier and index mutex. (On one thread the tasks only interleave, which
+// the `#[tokio::test]` cases above already cover.) More threads add nothing
+// on a 2-core runner, where this test shares the cores with one other test
+// and the mock server.
 //
-// Two does not deadlock. The workers take `std::sync::Mutex` only across
-// synchronous sections — `crawler.rs` acquires and drops the guard within a
-// statement, and the network fetch runs lock-free — so a worker thread is never
-// parked waiting on a task that itself needs a thread to make progress. The mock
-// server's accept loop and its per-connection tasks are ordinary async tasks and
-// multiplex onto whichever thread is free.
+// It can't deadlock: workers hold `std::sync::Mutex` only across synchronous
+// sections (`crawler.rs` takes and drops the guard within one statement, and
+// fetches run without it), so no worker thread waits on a task that needs a
+// thread. The mock server's tasks multiplex onto whichever thread is free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiworker_indexes_same_set_under_real_parallelism() {
     // The determinism test on a real multi-threaded runtime: the workers genuinely

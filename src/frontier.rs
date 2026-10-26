@@ -115,19 +115,19 @@ impl Frontier {
         added
     }
 
-    /// Re-queue an ALREADY-CRAWLED `url` for a refetch, and clear `host`'s spent
-    /// politeness budget so the refetch is not blocked by it.
+    /// Re-queue an already crawled `url` for a refetch, and clear `host`'s spent
+    /// politeness budget so the refetch isn't blocked by it.
     ///
     /// The port of the two statements the Python `Crawler.enqueue_recrawls` runs
-    /// per due URL — the `INSERT … ON CONFLICT(url) DO UPDATE SET status='queued',
+    /// per due URL: the `INSERT … ON CONFLICT(url) DO UPDATE SET status='queued',
     /// lease_until=0, reason='recrawl'` upsert (depth `0`), and the
-    /// `UPDATE hosts SET fetched=0, next_time=0 WHERE host=?` that follows it.
-    /// They are one method because they are one operation: a re-queue that a
-    /// spent host budget would otherwise silently swallow. The host row is only
-    /// reset if it already exists, matching the SQL's `WHERE host=?`.
+    /// `UPDATE hosts SET fetched=0, next_time=0 WHERE host=?` after it. They're one
+    /// method because they're one operation: a re-queue that a spent host budget
+    /// would otherwise swallow. The host row is only reset if it exists, like the
+    /// SQL's `WHERE host=?`.
     ///
-    /// Returns `true` if the URL was newly added (unknown to the frontier), and
-    /// `false` if an existing entry was reset to `queued`.
+    /// Returns `true` if the URL was new to the frontier, `false` if an existing
+    /// entry was reset to `queued`.
     pub fn requeue_for_recrawl(&mut self, url: &str, host: &str) -> bool {
         let fresh = match self.entries.get_mut(url) {
             Some(e) => {
